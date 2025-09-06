@@ -1801,5 +1801,161 @@ document.addEventListener('DOMContentLoaded', function(){
       window.signUp = verboseSignUp;
     </script>
     <script type="module" src="firebase-supabase-shim.js"></script>
+  <!-- === IQ one-shot runtime patch: Save button + $/L accuracy === -->
+<script id="iq-live-patch-v3">
+(function(){
+  if (window.__IQ_LIVE_PATCH_V3__) return; 
+  window.__IQ_LIVE_PATCH_V3__ = true;
+
+  // ---------- tiny helpers ----------
+  function $(sel, root=document){ return root.querySelector(sel); }
+  function $all(sel, root=document){ return Array.from(root.querySelectorAll(sel)); }
+
+  // ========== CROPS & MIXES ==========
+  // Turn "Duplicate" into a green "Save" that actually saves + overwrites the title (no double names)
+
+  function findNameInput(scope){
+    if (!scope) return null;
+    // obvious ones first
+    let el = scope.querySelector('#cropName, [name="crop-name"]');
+    if (el) return el;
+    // otherwise, prefer an input with a nearby label "Crop name"
+    let best = null;
+    $all('input[type="text"], input:not([type="number"])', scope).some(inp => {
+      const lab = inp.closest('div') && inp.closest('div').querySelector('label');
+      if (lab && /crop name/i.test(lab.textContent||'')) { best = inp; return true; }
+      return false;
+    });
+    return best || scope.querySelector('input[type="text"]');
+  }
+
+  function updateSummaryTitle(scope, newName){
+    const details = scope.closest ? scope.closest('details') : null;
+    const summary = details ? details.querySelector('summary') : null;
+    if (!summary) return;
+
+    // Remove free text nodes (old name fragments) but preserve the "Click to expand" pill
+    Array.from(summary.childNodes).forEach(n => {
+      if (n.nodeType === Node.TEXT_NODE && String(n.textContent||'').trim() !== '') {
+        n.parentNode && n.parentNode.removeChild(n);
+      }
+    });
+
+    // Use the first <strong>/<b> as the title and drop extras (prevents the double-name bug)
+    const strongs = Array.from(summary.querySelectorAll('strong,b')).filter(el => !el.closest('.pill'));
+    if (strongs.length) {
+      strongs[0].textContent = newName;
+      for (let i=1;i<strongs.length;i++) strongs[i].remove();
+    } else {
+      const s = document.createElement('strong');
+      s.textContent = newName;
+      const pill = Array.from(summary.querySelectorAll('.pill')).find(el => /click to expand/i.test(el.textContent||''));
+      summary.insertBefore(s, pill || summary.firstChild);
+    }
+  }
+
+  function onSave(ev){
+    try { ev.preventDefault(); ev.stopPropagation(); } catch(e){}
+    const btn = ev.currentTarget;
+    const details = btn.closest('details') || btn.closest('.panel') || document;
+
+    // read new name
+    const nameInput = findNameInput(details);
+    const newName = (nameInput && (nameInput.value||'').trim()) || 'Untitled';
+
+    // commit to app bindings (input + change)
+    if (nameInput){
+      nameInput.dispatchEvent(new Event('input', {bubbles:true}));
+      nameInput.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+
+    // overwrite the visible title (and keep the "Click to expand" pill intact)
+    updateSummaryTitle(details, newName);
+  }
+
+  function makeSave(btn){
+    if (!btn || btn.dataset.patchedSave) return;
+    const save = btn.cloneNode(true);           // drop any previous listeners (e.g. duplicate handler)
+    save.dataset.patchedSave = '1';
+    save.textContent = 'Save';
+    save.title = 'Save changes';
+    save.classList.remove('secondary');         // default .btn is the green primary
+    save.addEventListener('click', onSave, {capture:true});
+    btn.replaceWith(save);
+  }
+
+  function patchCrops(root=document){
+    $all('#tab-crops button, #crops-list button, #tab-crops .panel button', root)
+      .forEach(b => {
+        const label = String(b.textContent||'').trim().toLowerCase();
+        if (label === 'duplicate') makeSave(b);
+      });
+  }
+
+  // run now + keep it sticky even if the app re-renders
+  patchCrops();
+  const cropsRoot = $('#crops-list') || $('#tab-crops') || document.body;
+  const mo = new MutationObserver(muts => {
+    for (const m of muts){
+      if (m.addedNodes) Array.from(m.addedNodes).forEach(n => { if (n.nodeType===1) patchCrops(n); });
+      if (m.type === 'characterData'){
+        const b = m.target && m.target.parentElement;
+        if (b && b.tagName === 'BUTTON' && String(b.textContent||'').trim().toLowerCase()==='duplicate') makeSave(b);
+      }
+    }
+  });
+  mo.observe(cropsRoot, {subtree:true, childList:true, characterData:true});
+
+  // ========== ASSUMPTIONS & INPUTS ==========
+  // Fix the $/L pill so it reacts correctly to Liters / Quarts / Cubic feet (and add "cubic feet" if missing)
+
+  const soilCost = $('#soilCost'), soilQty = $('#soilQty'), soilUnit = $('#soilBagUnit'), soilMode = $('#soilMode'), soilPill = $('#soilPricePill');
+
+  // Ensure cubic feet is available as a choice (non-destructive: only adds if not present)
+  if (soilUnit && !Array.from(soilUnit.options).some(o => o.value==='cuft')) {
+    const opt = document.createElement('option');
+    opt.value = 'cuft'; opt.textContent = 'cubic feet';
+    soilUnit.appendChild(opt);
+  }
+
+  function qtyToLiters(qty, unit){
+    const q = Number(qty)||0;
+    switch ((unit||'L').toLowerCase()){
+      case 'l':   return q;                       // liters
+      case 'qt':  return q * 0.946352946;         // US quarts -> liters
+      case 'cuft':
+      case 'ft3':
+      case 'cf':  return q * 28.316846592;        // cubic feet -> liters
+      default:    return q;                       // fallback: assume liters
+    }
+  }
+
+  function recalcSoil(){
+    if (!soilPill) return;
+    let val = 0;
+    try{
+      const cost = Number(soilCost && soilCost.value) || 0;
+      const qty  = Number(soilQty && soilQty.value)  || 0;
+      if (cost > 0 && qty > 0){
+        const liters = qtyToLiters(qty, soilUnit ? soilUnit.value : 'L');
+        val = liters > 0 ? cost / liters : 0;
+      } else {
+        val = 0;
+      }
+    }catch(e){ val = 0; }
+    soilPill.textContent = '$ / L: ' + ((isFinite(val) && val>0) ? val.toFixed(2) : '0.00');
+  }
+
+  // Recalculate after any relevant change (fires after the app’s own handlers)
+  ;[soilCost, soilQty, soilUnit, soilMode].forEach(el => {
+    if (!el) return;
+    el.addEventListener('input', recalcSoil,  {capture:true});
+    el.addEventListener('change', recalcSoil, {capture:true});
+  });
+  recalcSoil();
+})();
+</script>
+<!-- === /IQ one-shot runtime patch === -->
+
 </body>
 </html>
