@@ -400,180 +400,162 @@ fieldset.style legend{padding:0 6px;color:#6b6b6b;font-size:11px}
 
 <!-- removed old Supabase block -->
 
-</script>
+<!-- === IQ one-shot runtime patch: Save button + $/L accuracy === -->
+<script id="iq-live-patch-v3">
+(function(){
+  if (window.__IQ_LIVE_PATCH_V3__) return; 
+  window.__IQ_LIVE_PATCH_V3__ = true;
 
-    
-<!-- removed old Supabase block -->
+  // ---------- tiny helpers ----------
+  function $(sel, root=document){ return root.querySelector(sel); }
+  function $all(sel, root=document){ return Array.from(root.querySelectorAll(sel)); }
 
-    
-<!-- === /Supabase Auth + Cloud Sync Adapter === -->
+  // ========== CROPS & MIXES ==========
+  // Turn "Duplicate" into a green "Save" that actually saves + overwrites the title (no double names)
 
+  function findNameInput(scope){
+    if (!scope) return null;
+    // obvious ones first
+    let el = scope.querySelector('#cropName, [name="crop-name"]');
+    if (el) return el;
+    // otherwise, prefer an input with a nearby label "Crop name"
+    let best = null;
+    $all('input[type="text"], input:not([type="number"])', scope).some(inp => {
+      const lab = inp.closest('div') && inp.closest('div').querySelector('label');
+      if (lab && /crop name/i.test(lab.textContent||'')) { best = inp; return true; }
+      return false;
+    });
+    return best || scope.querySelector('input[type="text"]');
+  }
 
-<!-- removed old Supabase block -->
+  function updateSummaryTitle(scope, newName){
+    const details = scope.closest ? scope.closest('details') : null;
+    const summary = details ? details.querySelector('summary') : null;
+    if (!summary) return;
 
-    
+    // Remove free text nodes (old name fragments) but preserve the "Click to expand" pill
+    Array.from(summary.childNodes).forEach(n => {
+      if (n.nodeType === Node.TEXT_NODE && String(n.textContent||'').trim() !== '') {
+        n.parentNode && n.parentNode.removeChild(n);
+      }
+    });
 
-<!-- === Firebase Auth + Cloud Sync Adapter (drop-in for Supabase) === -->
-<script type="module" id="firebase-adapter">
-(function() {
-  if (window.__FIREBASE_ADAPTER__) return;
-  window.__FIREBASE_ADAPTER__ = true;
+    // Use the first <strong>/<b> as the title and drop extras (prevents the double-name bug)
+    const strongs = Array.from(summary.querySelectorAll('strong,b')).filter(el => !el.closest('.pill'));
+    if (strongs.length) {
+      strongs[0].textContent = newName;
+      for (let i=1;i<strongs.length;i++) strongs[i].remove();
+    } else {
+      const s = document.createElement('strong');
+      s.textContent = newName;
+      const pill = Array.from(summary.querySelectorAll('.pill')).find(el => /click to expand/i.test(el.textContent||''));
+      summary.insertBefore(s, pill || summary.firstChild);
+    }
+  }
+
+  function onSave(ev){
+    try { ev.preventDefault(); ev.stopPropagation(); } catch(e){}
+    const btn = ev.currentTarget;
+    const details = btn.closest('details') || btn.closest('.panel') || document;
+
+    // read new name
+    const nameInput = findNameInput(details);
+    const newName = (nameInput && (nameInput.value||'').trim()) || 'Untitled';
+
+    // commit to app bindings (input + change)
+    if (nameInput){
+      nameInput.dispatchEvent(new Event('input', {bubbles:true}));
+      nameInput.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+
+    // overwrite the visible title (and keep the "Click to expand" pill intact)
+    updateSummaryTitle(details, newName);
+  }
+
+  function makeSave(btn){
+    if (!btn || btn.dataset.patchedSave) return;
+    const save = btn.cloneNode(true);           // drop any previous listeners (e.g. duplicate handler)
+    save.dataset.patchedSave = '1';
+    save.textContent = 'Save';
+    save.title = 'Save changes';
+    save.classList.remove('secondary');         // default .btn is the green primary
+    save.addEventListener('click', onSave, {capture:true});
+    btn.replaceWith(save);
+  }
+
+  function patchCrops(root=document){
+    $all('#tab-crops button, #crops-list button, #tab-crops .panel button', root)
+      .forEach(b => {
+        const label = String(b.textContent||'').trim().toLowerCase();
+        if (label === 'duplicate') makeSave(b);
+      });
+  }
+
+  // run now + keep it sticky even if the app re-renders
+  patchCrops();
+  const cropsRoot = $('#crops-list') || $('#tab-crops') || document.body;
+  const mo = new MutationObserver(muts => {
+    for (const m of muts){
+      if (m.addedNodes) Array.from(m.addedNodes).forEach(n => { if (n.nodeType===1) patchCrops(n); });
+      if (m.type === 'characterData'){
+        const b = m.target && m.target.parentElement;
+        if (b && b.tagName === 'BUTTON' && String(b.textContent||'').trim().toLowerCase()==='duplicate') makeSave(b);
+      }
+    }
+  });
+  mo.observe(cropsRoot, {subtree:true, childList:true, characterData:true});
+
+  // ========== ASSUMPTIONS & INPUTS ==========
+  // Fix the $/L pill so it reacts correctly to Liters / Quarts / Cubic feet (and add "cubic feet" if missing)
+
+  const soilCost = $('#soilCost'), soilQty = $('#soilQty'), soilUnit = $('#soilBagUnit'), soilMode = $('#soilMode'), soilPill = $('#soilPricePill');
+
+  // Ensure cubic feet is available as a choice (non-destructive: only adds if not present)
+  if (soilUnit && !Array.from(soilUnit.options).some(o => o.value==='cuft')) {
+    const opt = document.createElement('option');
+    opt.value = 'cuft'; opt.textContent = 'cubic feet';
+    soilUnit.appendChild(opt);
+  }
+
+  function qtyToLiters(qty, unit){
+    const q = Number(qty)||0;
+    switch ((unit||'L').toLowerCase()){
+      case 'l':   return q;                       // liters
+      case 'qt':  return q * 0.946352946;         // US quarts -> liters
+      case 'cuft':
+      case 'ft3':
+      case 'cf':  return q * 28.316846592;        // cubic feet -> liters
+      default:    return q;                       // fallback: assume liters
+    }
+  }
+
+  function recalcSoil(){
+    if (!soilPill) return;
+    let val = 0;
+    try{
+      const cost = Number(soilCost && soilCost.value) || 0;
+      const qty  = Number(soilQty && soilQty.value)  || 0;
+      if (cost > 0 && qty > 0){
+        const liters = qtyToLiters(qty, soilUnit ? soilUnit.value : 'L');
+        val = liters > 0 ? cost / liters : 0;
+      } else {
+        val = 0;
+      }
+    }catch(e){ val = 0; }
+    soilPill.textContent = '$ / L: ' + ((isFinite(val) && val>0) ? val.toFixed(2) : '0.00');
+  }
+
+  // Recalculate after any relevant change (fires after the app’s own handlers)
+  ;[soilCost, soilQty, soilUnit, soilMode].forEach(el => {
+    if (!el) return;
+    el.addEventListener('input', recalcSoil,  {capture:true});
+    el.addEventListener('change', recalcSoil, {capture:true});
+  });
+  recalcSoil();
 })();
-// Adapter code:
-
-  // Firebase v12 CDN modules
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
-  import {
-    getAuth, onAuthStateChanged,
-    signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
-    setPersistence, browserLocalPersistence
-  } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, serverTimestamp
-  } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
-
-  const firebaseConfig = {
-  "apiKey": "AIzaSyB-iJ_OwpoRVae4WMQN0nQrT_vCbk8PaMg",
-  "authDomain": "microgreens-consulting.firebaseapp.com",
-  "projectId": "microgreens-consulting",
-  "storageBucket": "microgreens-consulting.firebasestorage.app",
-  "messagingSenderId": "475533983094",
-  "appId": "1:475533983094:web:857445fcc8d5f82a8f4e57",
-  "measurementId": "G-FRTY3RJPTT"
-};
-
-  // init
-  const app = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db   = getFirestore(app);
-  await setPersistence(auth, browserLocalPersistence);
-
-  // UI elements already in the HTML
-  const cloudBar = document.getElementById('cloud-controls');
-  const whoami   = document.getElementById('whoami');
-  const statusEl = document.getElementById('status');
-
-  // Login gate controls
-  const gateEmail     = document.getElementById('gate-email');
-  const gatePassword  = document.getElementById('gate-password');
-  const gatePasscode  = document.getElementById('gate-passcode');
-  const btnGateIn     = document.getElementById('gate-signin');
-  const btnGateUp     = document.getElementById('gate-signup');
-
-  // Optional mini auth box fields
-  const emailEl = document.getElementById('email');
-  const passEl  = document.getElementById('password');
-
-  const LOCAL_KEY = 'microgreens_calc_unified';
-
-  function collectLocalState() {
-    try {
-      const single = localStorage.getItem(LOCAL_KEY);
-      if (single) return { [LOCAL_KEY]: single };
-    } catch (e) {}
-    const out = {};
-    for (let i=0;i<localStorage.length;i++) {
-      const k = localStorage.key(i);
-      out[k] = localStorage.getItem(k);
-    }
-    return out;
-  }
-  function applyLocalState(state) {
-    if (!state) return;
-    try { localStorage.clear(); } catch (e) {}
-    for (const k in state) {
-      const v = state[k];
-      if (typeof v === 'string') localStorage.setItem(k, v);
-    }
-    try { location.reload(); } catch (e) {}
-  }
-
-  async function saveToCloud() {
-    if (statusEl) statusEl.textContent = 'Saving…';
-    const user = auth.currentUser;
-    if (!user) { if (statusEl) statusEl.textContent = 'Please sign in first.'; return; }
-    const payload = collectLocalState();
-    await setDoc(
-      doc(db, 'app_state', user.uid),
-      { state: payload, updated_at: serverTimestamp() },
-      { merge: true }
-    );
-    if (statusEl) statusEl.textContent = 'Saved to cloud ✔';
-  }
-  async function loadFromCloud() {
-    if (statusEl) statusEl.textContent = 'Loading…';
-    const user = auth.currentUser;
-    if (!user) { if (statusEl) statusEl.textContent = 'Please sign in first.'; return; }
-    const snap = await getDoc(doc(db, 'app_state', user.uid));
-    if (snap.exists()) {
-      const data = snap.data();
-      applyLocalState((data && data.state) || {});
-      if (statusEl) statusEl.textContent = 'Loaded cloud data ✔';
-    } else {
-      if (statusEl) statusEl.textContent = 'No cloud save yet. Use "Save to Cloud".';
-    }
-  }
-
-  async function doSignIn(email, password) {
-    await signInWithEmailAndPassword(auth, email, password);
-  }
-  async function doSignUp(email, password) {
-    const code = (gatePasscode && gatePasscode.value ? gatePasscode.value : '').trim();
-    if (code !== 'microgreensconsulting') {
-      alert('Incorrect passcode.');
-      return;
-    }
-    await createUserWithEmailAndPassword(auth, email, password);
-    alert('Account created.');
-  }
-  async function doSignOut() { await signOut(auth); }
-
-  // Gate buttons
-  if (btnGateIn) {
-    btnGateIn.addEventListener('click', async function() {
-      try { await doSignIn(gateEmail.value, gatePassword.value); }
-      catch(e){ alert((e && e.message) || 'Sign-in failed'); console.error(e); }
-    });
-  }
-  if (btnGateUp) {
-    btnGateUp.addEventListener('click', async function() {
-      try { await doSignUp(gateEmail.value, gatePassword.value); }
-      catch(e){ alert((e && e.message) || 'Signup failed'); console.error(e); }
-    });
-  }
-
-  // Optional mini-auth box
-  window.signIn  = async function () { try { await doSignIn(emailEl.value, passEl.value); } catch(e){ alert((e && e.message) || 'Sign-in failed'); } };
-  window.signUp  = async function () { try { await doSignUp(emailEl.value, passEl.value); } catch(e){ alert((e && e.message) || 'Signup failed'); } };
-  window.signOut = async function () { try { await doSignOut(); } catch(e){ console.error(e); } };
-
-  // Cloud actions on window for existing buttons
-  window.saveToCloud = saveToCloud;
-  window.loadFromCloud = loadFromCloud;
-
-  // Keep UI synced with auth session
-  onAuthStateChanged(auth, async function(user) {
-    if (user) {
-      document.body.classList.add('authed');
-      if (whoami) whoami.textContent = 'Signed in as ' + user.email;
-      if (cloudBar) cloudBar.style.display = 'flex';
-      try { await loadFromCloud(); } catch (e) {}
-    } else {
-      document.body.classList.remove('authed');
-      if (whoami) whoami.textContent = '';
-      if (cloudBar) cloudBar.style.display = 'none';
-      if (statusEl) statusEl.textContent = '';
-    }
-  });
-
-  // Optional: auto-save on tab hide
-  document.addEventListener('visibilitychange', function() {
-    if (document.visibilityState === 'hidden') {
-      try { saveToCloud(); } catch (e) { }
-    }
-  });
-
 </script>
-<!-- === /Firebase Auth + Cloud Sync Adapter === -->
+<!-- === /IQ one-shot runtime patch === -->
+<!-- Firebase → Supabase shim -->
+<script type="module" src="firebase-shim-test.js"></script>
 </body>
 </html>
